@@ -1,9 +1,9 @@
-# synth — alien-but-catchy soundtrack engine (v2)
+# synth — catchy soundtrack engine (v2)
 
 A dependency-light (numpy + scipy + stdlib `wave`) synth that renders a ~3:13
 modern pop/electronic track engineered for **catchiness and replay-craving**,
 grounded in the verified psychoacoustics in [`../REPORT.md`](../REPORT.md).
-Design thesis: **alien skin, human skeleton — addictive, not trance.**
+Design thesis: **addictive, not trance.**
 
 ## Run
 
@@ -20,8 +20,7 @@ Deterministic (seeded).
 - **The "Axis" minor vamp** (Am–F–C–G) — one of the stickiest progressions —
   with real harmonic *movement* (not a drone), so it stays catchy not hypnotic.
 - **A repeated earworm hook**: a conventional arch contour that *leaps* up to a
-  long held peak note (the peak gets a small +15-cent **alien** lean for
-  identity), with a call-and-response answer phrase.
+  long held peak note, with a call-and-response answer phrase.
 - **Multiple anticipation→drop cycles** (the dopaminergic engine): two builds
   with accelerating snare rolls + filter-opening risers, into escalating drops,
   plus a half-time bridge reset before the biggest final drop.
@@ -32,7 +31,7 @@ Deterministic (seeded).
   fills; four-on-the-floor in drops, broken beat in verses, half-time bridge.
 - **Octave-bounce bassline** for groove movement; low-mids carved so the hook
   and bass each breathe.
-- **Unresolved earworm tail**: ends hanging on the alien peak note (open loop).
+- **Unresolved earworm tail**: ends hanging on the 5th, not the tonic (open loop).
 
 ## Structure
 `Intro → Verse A → Build → DROP 1 → Verse B → Build → DROP 2 → Bridge → FINAL DROP → Outro`

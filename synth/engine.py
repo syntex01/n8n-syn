@@ -12,7 +12,6 @@ grounded in the verified research (see ../REPORT.md):
   * MOVEMENT over drone (chords change, bass walks, arps run) so it stays
     catchy rather than hypnotic
   * SIDECHAIN pump locked to the kick  = the modern "cool" groove feel
-  * a touch of alien identity (a blue/microtonal lean on the hook's peak note)
 
 v2 priorities vs v1: catchier hooks, far more events (fills, risers, impacts,
 arps, vocal-chop stabs, counter-melodies), real drum kit, harmonic motion.
@@ -470,9 +469,8 @@ def render():
         for b in range(4):
             bar = bar4_start + b
             for (name, octv, step, ln) in HOOK[b]:
-                alien = 15.0 if step == 4 else 0.0   # alien lean on the peak note
                 i_lead(name, octv + octave_shift, ln, bar, step,
-                       gain=gain, pan=0.5, alien=alien)
+                       gain=gain, pan=0.5)
             if response:
                 for (name, octv, step, ln) in RESP[b]:
                     i_lead(name, octv + octave_shift, ln, bar, step, gain=gain * 0.6, pan=0.62)
@@ -607,8 +605,8 @@ def render():
     for bar in range(92, 96):
         play_chords(bar, gain=0.34, bright=2600 - (bar - 92) * 550)
     play_hook_pluck(92, gain=0.4)
-    # final hang on the alien-leaning peak note, no resolution to tonic
-    i_lead("E", 2, 8, 95, 4, gain=0.5, alien=15.0)
+    # final hang on the 5th, no resolution to tonic -> the open-loop earworm tail
+    i_lead("E", 2, 8, 95, 4, gain=0.5)
 
     # ============================================== MIX
     sc_pump = make_sidechain(total_sec, kick_times, depth=0.8)
