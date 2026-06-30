@@ -1,0 +1,3 @@
+synth/*.wav
+__pycache__/
+*.pyc
