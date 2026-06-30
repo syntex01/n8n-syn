@@ -1,375 +1,627 @@
 """
-Psychoacoustic soundtrack engine.
+Catchy soundtrack engine v2  --  "addictive, not trance".
 
-A self-contained additive/subtractive synth (numpy + stdlib wave only) that
-bakes in the effects surfaced by the deep-research sweep on what makes music
-"addicting" and what lets genuinely novel ("alien") sound still click with the
-human brain. Each effect is annotated in the section that implements it.
+A dependency-light (numpy + scipy + stdlib wave) synth that renders a ~3 min
+modern pop/electronic track engineered for catchiness and replay-craving,
+grounded in the verified research (see ../REPORT.md):
 
-Design thesis: OPTIMAL SURPRISE. The reward system fires hardest on the
-just-barely-resolvable, not the predictable or the random. So: alien skin,
-human skeleton. Unfamiliar surface (7/11-limit just-intonation tuning,
-inharmonic bell timbres) wrapped around universal hooks the brain locks onto
-(entrainable pulse, anticipation->resolution arcs, the groove syncopation
-sweet-spot, sub-bass body coupling, a sticky repeated melodic hook).
+  * dopaminergic ANTICIPATION -> RESOLUTION  -> multiple build/drop cycles
+  * EARWORM recipe: conventional arch contour + a signature leap, repeated
+    with subtle variation, left unresolved at the end (open loop)
+  * the "Axis" minor vamp (i-VI-III-VII) -- one of the stickiest progressions
+  * MOVEMENT over drone (chords change, bass walks, arps run) so it stays
+    catchy rather than hypnotic
+  * SIDECHAIN pump locked to the kick  = the modern "cool" groove feel
+  * a touch of alien identity (a blue/microtonal lean on the hook's peak note)
+
+v2 priorities vs v1: catchier hooks, far more events (fills, risers, impacts,
+arps, vocal-chop stabs, counter-melodies), real drum kit, harmonic motion.
 """
 
-import math
 import struct
 import wave
 
 import numpy as np
+from scipy.signal import butter, lfilter, sosfilt
 
 SR = 44100
+BPM = 122.0
+BEAT = 60.0 / BPM
+STEP = BEAT / 4.0          # 16th grid
+BAR = BEAT * 4
+ROOT = 220.0               # A3
 
-
-# ----------------------------------------------------------------------------
-# Tuning  -- "alien but clicking"
-# 7- and 11-limit just intonation. Pure harmonic-series ratios are MAXIMALLY
-# consonant (low roughness -> the brain reads them as "in tune" / it clicks),
-# yet the 7- and 11-limit steps (7/6, 11/8, 7/4) sit between the 12-TET cracks
-# and sound distinctly alien to Western-trained ears. Consonant skeleton,
-# unfamiliar surface.
-# ----------------------------------------------------------------------------
-RATIOS = {
-    "1": 1 / 1, "9/8": 9 / 8, "7/6": 7 / 6, "5/4": 5 / 4,
-    "11/8": 11 / 8, "3/2": 3 / 2, "7/4": 7 / 4, "2": 2 / 1,
-    "9/4": 9 / 4, "5/2": 5 / 2, "3": 3 / 1, "7/2": 7 / 2,
+# ---------------------------------------------------------------- note helpers
+# 12-TET (catchiness lives in equal temperament), root A. Semitone offsets.
+NOTE = {  # name -> semitones from A
+    "A": 0, "A#": 1, "B": 2, "C": 3, "C#": 4, "D": 5, "D#": 6,
+    "E": 7, "F": 8, "F#": 9, "G": 10, "G#": 11,
 }
-BASE = 220.0  # A3 root
 
 
-def hz(name, octave_shift=0):
-    return BASE * RATIOS[name] * (2 ** octave_shift)
+def hz(name, octave=0, cents=0.0):
+    semis = NOTE[name] + 12 * octave + cents / 100.0
+    return ROOT * 2 ** (semis / 12.0)
 
 
-# ----------------------------------------------------------------------------
-# Envelopes & helpers
-# ----------------------------------------------------------------------------
-def adsr(n, a=0.01, d=0.1, s=0.7, r=0.2):
-    """Sample-accurate ADSR over n samples; times in seconds."""
+# ---------------------------------------------------------------- envelopes
+def adsr(n, a=0.005, d=0.08, s=0.7, r=0.1, curve=2.0):
     a_n = max(1, int(a * SR)); d_n = max(1, int(d * SR)); r_n = max(1, int(r * SR))
-    env = np.zeros(n)
     if a_n + d_n + r_n >= n:
-        # short note: just attack+release triangle
-        h = n // 2
+        env = np.ones(n)
+        h = max(1, n // 6)
         env[:h] = np.linspace(0, 1, h)
-        env[h:] = np.linspace(1, 0, n - h)
+        env[-h:] = np.linspace(env[-h], 0, h)
         return env
     sus_n = n - a_n - d_n - r_n
+    env = np.empty(n)
     env[:a_n] = np.linspace(0, 1, a_n)
-    env[a_n:a_n + d_n] = np.linspace(1, s, d_n)
+    env[a_n:a_n + d_n] = s + (1 - s) * (np.linspace(1, 0, d_n) ** curve)
     env[a_n + d_n:a_n + d_n + sus_n] = s
-    env[a_n + d_n + sus_n:] = np.linspace(s, 0, r_n)
+    env[a_n + d_n + sus_n:] = s * (np.linspace(1, 0, r_n) ** curve)
     return env
 
 
-def t_arr(dur):
+def perc_env(n, decay=12.0):
+    t = np.linspace(0, 1, n)
+    return np.exp(-t * decay)
+
+
+def t_of(dur):
     return np.arange(int(dur * SR)) / SR
+
+
+# ---------------------------------------------------------------- filters
+def lowpass(x, cutoff, order=4):
+    cutoff = max(20.0, min(cutoff, SR / 2 - 100))
+    sos = butter(order, cutoff / (SR / 2), btype="low", output="sos")
+    return sosfilt(sos, x)
+
+
+def highpass(x, cutoff, order=2):
+    cutoff = max(20.0, min(cutoff, SR / 2 - 100))
+    sos = butter(order, cutoff / (SR / 2), btype="high", output="sos")
+    return sosfilt(sos, x)
+
+
+def env_lowpass(x, c_start, c_end, order=3):
+    """Time-varying lowpass (filter sweep) -- approximated by crossfading a
+    few static bands. Cheap but gives the 'opening filter' rise that makes
+    builds feel cool."""
+    n = len(x)
+    bands = 12
+    out = np.zeros(n)
+    cs = np.linspace(c_start, c_end, bands)
+    win = n // bands
+    for i, c in enumerate(cs):
+        seg = slice(i * win, (i + 1) * win if i < bands - 1 else n)
+        out[seg] = lowpass(x, c, order)[seg]
+    return out
 
 
 def soft_clip(x, drive=1.0):
     return np.tanh(x * drive)
 
 
-# ----------------------------------------------------------------------------
-# Voices
-# ----------------------------------------------------------------------------
-def additive_tone(freq, dur, partials=8, inharm=0.0, decay=1.6,
-                  detune=0.0, amp=1.0, env=None):
-    """Additive voice. inharm>0 stretches partials -> bell/metallic ALIEN
-    timbre (inharmonic spectra read as 'otherworldly' but stay pitched).
-    inharm=0 -> pure harmonic series (singable, earworm-friendly lead).
-    """
-    t = t_arr(dur)
+# ---------------------------------------------------------------- oscillators
+def _phase(freq, dur):
+    return 2 * np.pi * freq * t_of(dur)
+
+
+def saw(freq, dur, harmonics=None):
+    """Fast phase-based ramp saw in [-1, 1]. Aliasing above the (always
+    applied) lowpass is inaudible, and this renders ~100x faster than the
+    additive sum -- crucial for iterating on the arrangement."""
+    t = t_of(dur)
+    p = t * freq
+    return 2.0 * (p - np.floor(0.5 + p))
+
+
+def square(freq, dur, harmonics=None):
+    t = t_of(dur)
+    p = t * freq
+    return np.where((p - np.floor(p)) < 0.5, 1.0, -1.0)
+
+
+def sine(freq, dur):
+    return np.sin(_phase(freq, dur))
+
+
+def supersaw(freq, dur, voices=7, detune=0.18, harmonics=None):
+    """Detuned stacked saws -> the big, lush, 'cool' EDM lead/chord sound."""
+    t = t_of(dur)
     out = np.zeros(len(t))
-    for k in range(1, partials + 1):
-        # stretched-partial inharmonicity (Fletcher-style) for alien color
-        pf = freq * k * math.sqrt(1 + inharm * k * k)
-        pf *= (1 + detune * (k - 1))
-        out += (1.0 / (k ** decay)) * np.sin(2 * np.pi * pf * t)
-    if env is None:
-        env = adsr(len(t), 0.012, 0.18, 0.55, 0.25)
-    return amp * out * env
+    spread = np.linspace(-detune, detune, voices)
+    for i, d in enumerate(spread):
+        f = freq * 2 ** (d / 12.0)
+        p = t * f + i * 0.13      # per-voice phase offset -> thick unison
+        out += 2.0 * (p - np.floor(0.5 + p))
+    return out / voices * 1.3
 
 
-def sub_bass(freq, dur, amp=1.0):
-    """Low sine with a fast pitch-drop transient. Sub-bass (~40-70 Hz)
-    couples to the body, not just the ear -- the felt, embodied pulse that
-    drives entrainment and the urge to move."""
-    t = t_arr(dur)
-    pitch_env = freq * (1 + 1.5 * np.exp(-t * 30))  # click-y attack
-    phase = 2 * np.pi * np.cumsum(pitch_env) / SR
-    env = adsr(len(t), 0.004, 0.08, 0.6, 0.18)
-    body = np.sin(phase)
-    return amp * soft_clip(body * env, 1.4)
+def fm(freq, dur, ratio=2.0, index=4.0, idx_decay=4.0):
+    """2-op FM -> bell/pluck/metallic tones. index decays for a pluck attack."""
+    t = t_of(dur)
+    mod = np.sin(2 * np.pi * freq * ratio * t) * index * np.exp(-t * idx_decay)
+    return np.sin(2 * np.pi * freq * t + mod)
 
 
-def kick(dur=0.32, amp=1.0):
-    t = t_arr(dur)
-    pitch = 110 * np.exp(-t * 26) + 42
+# ---------------------------------------------------------------- drum kit
+def kick(dur=0.4, amp=1.0, punch=1.0):
+    t = t_of(dur)
+    pitch = (160 * punch) * np.exp(-t * 32) + 48
     phase = 2 * np.pi * np.cumsum(pitch) / SR
-    env = np.exp(-t * 9)
-    click = np.exp(-t * 220) * 0.6
-    return amp * soft_clip((np.sin(phase) + click) * env, 1.6)
+    body = np.sin(phase) * np.exp(-t * 7.5)
+    click = (np.random.uniform(-1, 1, len(t)) * np.exp(-t * 800)) * 0.5
+    return amp * soft_clip(body + click, 1.5)
 
 
-def hat(dur=0.06, amp=0.5, lp=False):
+def snare(dur=0.22, amp=1.0):
+    t = t_of(dur)
+    tone = (np.sin(2 * np.pi * 190 * t) + np.sin(2 * np.pi * 280 * t)) * np.exp(-t * 22)
+    noise = highpass(np.random.uniform(-1, 1, len(t)), 1500) * np.exp(-t * 18)
+    return amp * soft_clip(0.5 * tone + 0.9 * noise, 1.2)
+
+
+def clap(dur=0.3, amp=1.0):
     n = int(dur * SR)
-    noise = np.random.uniform(-1, 1, n)
-    # crude high-pass: subtract running mean
-    k = 8
-    sm = np.convolve(noise, np.ones(k) / k, mode="same")
-    hp = noise - sm
-    env = np.exp(-np.linspace(0, 1, n) * (18 if not lp else 9))
-    return amp * hp * env
-
-
-def noise_riser(dur, amp=0.6):
-    """Filtered-noise sweep up in amplitude+brightness. The ANTICIPATION
-    device: rising tension that primes a prediction the brain then craves to
-    see resolved (ITPRA / reward-prediction)."""
-    n = int(dur * SR)
-    noise = np.random.uniform(-1, 1, n)
-    bright = np.linspace(0.02, 1.0, n)  # open the filter over time
     out = np.zeros(n)
-    prev = 0.0
-    # one-pole low-pass with rising cutoff -> "opening" sweep
-    for i in range(n):
-        a = bright[i]
-        prev = prev + a * (noise[i] - prev)
-        out[i] = prev
-    env = np.linspace(0, 1, n) ** 2
-    return amp * out * env
+    noise = highpass(np.random.uniform(-1, 1, n), 1200)
+    # 3 quick bursts + tail = the classic clap
+    for off, g in [(0, 1.0), (0.009, 0.9), (0.018, 0.8)]:
+        i = int(off * SR)
+        env = np.zeros(n); env[i:] = np.exp(-np.linspace(0, 1, n - i) * 40)
+        out += g * noise * env
+    tail = noise * np.exp(-np.linspace(0, 1, n) * 12) * 0.5
+    return amp * (out + tail)
 
 
-# ----------------------------------------------------------------------------
-# Effects
-# ----------------------------------------------------------------------------
-def am_entrain(sig, rate, depth=0.18):
-    """Amplitude modulation at a fixed rate. REAL rhythmic entrainment (the
-    auditory system tracks periodic amplitude envelopes) -- deliberately NOT
-    the binaural-beats myth, which the verification pass flagged as weak."""
-    t = np.arange(len(sig)) / SR
-    lfo = 1 - depth + depth * np.sin(2 * np.pi * rate * t)
-    return sig * lfo
+def hat(dur=0.05, amp=0.5, open_=False):
+    n = int(dur * SR)
+    noise = highpass(np.random.uniform(-1, 1, n), 7000)
+    env = np.exp(-np.linspace(0, 1, n) * (6 if open_ else 28))
+    return amp * noise * env
 
 
-def schroeder_reverb(sig, mix=0.25):
-    """Cheap feedback-comb + allpass reverb for space/immersion."""
+def crash(dur=1.6, amp=0.7):
+    n = int(dur * SR)
+    noise = highpass(np.random.uniform(-1, 1, n), 4000)
+    env = np.exp(-np.linspace(0, 1, n) * 3.5)
+    return amp * noise * env
+
+
+def tom(freq=160, dur=0.28, amp=0.8):
+    t = t_of(dur)
+    pitch = freq * (1 + 0.6 * np.exp(-t * 20))
+    phase = 2 * np.pi * np.cumsum(pitch) / SR
+    return amp * np.sin(phase) * np.exp(-t * 9)
+
+
+def riser(dur, amp=0.6, kind="noise"):
+    n = int(dur * SR)
+    t = np.linspace(0, 1, n)
+    if kind == "noise":
+        x = np.random.uniform(-1, 1, n)
+        x = env_lowpass(x, 300, 12000)
+        env = t ** 2
+        return amp * x * env
+    # tonal uplifter: rising sine sweep
+    f = 200 * 2 ** (t * 4)
+    phase = 2 * np.pi * np.cumsum(f) / SR
+    return amp * np.sin(phase) * (t ** 1.5)
+
+
+def downlifter(dur=1.2, amp=0.5):
+    n = int(dur * SR)
+    t = np.linspace(0, 1, n)
+    f = 1800 * 2 ** (-t * 4)
+    phase = 2 * np.pi * np.cumsum(f) / SR
+    return amp * np.sin(phase) * np.exp(-t * 1.5)
+
+
+def snare_roll(bars, bar_i, gain=0.5):
+    """Accelerating snare roll into a drop -- a huge anticipation device."""
+    events = []
+    divs = [4, 4, 8, 8, 16, 16]  # subdivisions per beat, accelerating
+    pos = 0.0
+    for beat_i in range(int(bars * 4)):
+        div = divs[min(beat_i, len(divs) - 1)]
+        for j in range(div):
+            t = (bar_i * 4 + beat_i) * BEAT + j * (BEAT / div)
+            g = gain * (0.5 + 0.5 * (beat_i / (bars * 4)))
+            events.append((t, g))
+    return events
+
+
+# ---------------------------------------------------------------- mix bus
+class Bus:
+    def __init__(self, total_sec):
+        self.n = int(total_sec * SR)
+        self.L = np.zeros(self.n)
+        self.R = np.zeros(self.n)
+
+    def add(self, sig, at_sec, gain=1.0, pan=0.5):
+        i = int(at_sec * SR)
+        if i >= self.n:
+            return
+        j = min(self.n, i + len(sig))
+        seg = sig[:j - i]
+        self.L[i:j] += gain * (1 - pan) * 2 ** 0.5 * seg * 0.7071
+        self.R[i:j] += gain * pan * 2 ** 0.5 * seg * 0.7071
+
+
+def make_sidechain(total_sec, kick_times, depth=0.85, attack=0.004, release=0.18):
+    """Volume-duck envelope that dips on each kick and recovers -> pump."""
+    n = int(total_sec * SR)
+    env = np.ones(n)
+    a_n = int(attack * SR); r_n = int(release * SR)
+    duck = np.concatenate([
+        np.linspace(1, 1 - depth, a_n),
+        1 - depth + depth * (1 - np.exp(-np.linspace(0, 5, r_n))),
+    ])
+    for kt in kick_times:
+        i = int(kt * SR)
+        if i >= n:
+            continue
+        j = min(n, i + len(duck))
+        env[i:j] = np.minimum(env[i:j], duck[:j - i])
+    return env
+
+
+def delay(sig, time, feedback=0.35, mix=0.3, n_echo=6):
     out = sig.copy()
-    for delay_ms, g in [(29.7, 0.78), (37.1, 0.74), (41.1, 0.7), (43.7, 0.66)]:
-        d = int(delay_ms / 1000 * SR)
-        buf = np.zeros(len(sig) + d)
-        buf[:len(sig)] = sig
-        for i in range(d, len(buf)):
-            buf[i] += g * buf[i - d]
-        out += mix * buf[:len(sig)]
+    d = int(time * SR)
+    for k in range(1, n_echo + 1):
+        g = mix * feedback ** (k - 1)
+        shifted = np.zeros_like(sig)
+        if d * k < len(sig):
+            shifted[d * k:] = sig[:-d * k]
+        out += g * shifted
+    return out
+
+
+def _comb(x, d, g):
+    """Feedback comb y[n]=x[n]+g*y[n-d], computed fast: the d interleaved
+    phase groups are each a cheap 1st-order IIR (len-2 denominator)."""
+    out = np.empty_like(x)
+    for r in range(d):
+        out[r::d] = lfilter([1.0], [1.0, -g], x[r::d])
+    return out
+
+
+def reverb(sig, mix=0.2, decay=0.5):
+    out = sig.copy()
+    for dl, g in [(0.0297, 0.78), (0.0371, 0.74), (0.0411, 0.7), (0.0437, 0.66)]:
+        d = int(dl * SR)
+        out += mix * _comb(sig, d, g * decay)
     return out / (1 + mix * 4)
 
 
-def stereo_widen(left, right, ms=12):
-    d = int(ms / 1000 * SR)
-    r = np.concatenate([np.zeros(d), right[:-d]]) if d < len(right) else right
-    return left, r
+# ============================================================ COMPOSITION
+CHORDS = {
+    "Am": ["A", "C", "E"],
+    "F":  ["F", "A", "C"],
+    "C":  ["C", "E", "G"],
+    "G":  ["G", "B", "D"],
+}
+SEQ = ["Am", "F", "C", "G"]          # the "Axis" minor vamp -- maximally sticky
+BASS_ROOT = {"Am": "A", "F": "F", "C": "C", "G": "G"}
 
-
-# ----------------------------------------------------------------------------
-# Sequencing
-# ----------------------------------------------------------------------------
-class Track:
-    def __init__(self, total_sec):
-        self.n = int(total_sec * SR)
-        self.buf = np.zeros(self.n)
-
-    def add(self, sig, at_sec, gain=1.0):
-        i = int(at_sec * SR)
-        j = min(self.n, i + len(sig))
-        if i < self.n:
-            self.buf[i:j] += gain * sig[:j - i]
-        return self
+# Earworm hook: identical rhythm every bar (sticky), an arch contour that
+# LEAPS up to a long held "peak" note (step 4) -- and that peak gets a small
+# +15-cent "alien" lean for identity. (name, octave, step, len_steps)
+HOOK = [
+    # bar 0 (Am)
+    [("E", 1, 0, 3), ("A", 1, 3, 1), ("C", 2, 4, 4), ("B", 1, 8, 2), ("A", 1, 10, 2), ("E", 1, 12, 4)],
+    # bar 1 (F)
+    [("F", 1, 0, 3), ("A", 1, 3, 1), ("C", 2, 4, 4), ("A", 1, 8, 2), ("F", 1, 10, 2), ("C", 2, 12, 4)],
+    # bar 2 (C)
+    [("G", 1, 0, 3), ("C", 2, 3, 1), ("E", 2, 4, 4), ("D", 2, 8, 2), ("C", 2, 10, 2), ("G", 1, 12, 4)],
+    # bar 3 (G)
+    [("G", 1, 0, 3), ("B", 1, 3, 1), ("D", 2, 4, 4), ("B", 1, 8, 2), ("G", 1, 10, 2), ("D", 2, 12, 4)],
+]
+# call-and-response answer phrase (sparse, an octave up, fills the gaps)
+RESP = [
+    [("A", 2, 14, 2)], [("C", 3, 14, 2)], [("E", 3, 14, 2)], [("D", 3, 13, 3)],
+]
 
 
 def render():
-    np.random.seed(7)  # determinism (Math.random/Date are unavailable anyway)
-    BPM = 104
-    beat = 60.0 / BPM
-    step = beat / 4.0           # 16th-note grid
-    bar = beat * 4
-    swing = 0.055 * step        # microtiming: humanizing swing on off-beats
+    np.random.seed(11)
+    total_bars = 96
+    total_sec = total_bars * BAR + 4.0
+    drums = Bus(total_sec)   # dry
+    pump = Bus(total_sec)    # bass + chords (heavy sidechain)
+    music = Bus(total_sec)   # lead + arp + vox (light sidechain)
+    kick_times = []
+    SWING = 0.045 * STEP
 
-    TOTAL_BARS = 64
-    TOTAL = TOTAL_BARS * bar + 6.0
-    L = Track(TOTAL)
-    R = Track(TOTAL)
+    def st(bar, step):
+        tt = bar * BAR + step * STEP
+        return tt + (SWING if step % 2 == 1 else 0.0)
 
-    def step_time(bar_i, s):
-        t = bar_i * bar + s * step
-        if s % 2 == 1:          # swing the off-16ths
-            t += swing
-        return t
+    def add_wide(bus, sig, at, gain, haas_ms=11, spread=0.85):
+        """Haas-style stereo widener: same signal, tiny delay on one side,
+        panned apart -> the big 'cool' wide pad/lead image."""
+        d = int(haas_ms / 1000 * SR)
+        bus.add(sig, at, gain, pan=1 - spread)
+        sigR = np.concatenate([np.zeros(d), sig[:-d]]) if d < len(sig) else sig
+        bus.add(sigR, at, gain, pan=spread)
 
-    # ----- The HOOK (earworm): compact arch contour + a distinctive leap.
-    # Sticky melodies tend to be a rising-then-falling arch at a brisk tempo
-    # with one memorable interval jump. The leap here lands on the alien 7/4.
-    hook = [  # (scale degree, octave, step index, length-in-steps)
-        ("1", 1, 0, 2), ("5/4", 1, 2, 2), ("3/2", 1, 4, 2),
-        ("7/4", 1, 6, 3), ("3/2", 1, 9, 1), ("5/4", 1, 10, 2),
-        ("9/8", 1, 12, 2), ("1", 1, 14, 2),
-    ]
-    # A subtle VARIATION used on repeats -> optimal surprise / mere-exposure:
-    # same skeleton, one note nudged so each loop is familiar-but-fresh.
-    hook_var = [
-        ("1", 1, 0, 2), ("5/4", 1, 2, 2), ("3/2", 1, 4, 2),
-        ("7/4", 1, 6, 3), ("11/8", 1, 9, 1), ("5/4", 1, 10, 2),
-        ("7/6", 1, 12, 2), ("1", 1, 14, 2),
-    ]
+    # ----------------------------------------------------------- instruments
+    def i_bass(name, octv, dur_steps, bar, step, gain=0.9):
+        f = hz(name, octv)
+        dur = dur_steps * STEP * 0.96
+        n = int(dur * SR)
+        s = lowpass(saw(f, dur, 14), 900)
+        sub = sine(f / 2, dur) * 0.9
+        env = adsr(n, 0.004, 0.06, 0.8, 0.05)
+        w = (0.7 * s[:n] + sub[:n]) * env
+        pump.add(soft_clip(w, 1.3), st(bar, step), gain, 0.5)
 
-    def play_hook(bar_i, notes, gain=0.5, inharm=0.0, oct_shift=0):
-        for deg, octv, s, ln in notes:
-            f = hz(deg, octv + oct_shift)
-            dur = ln * step * 1.05
-            env = adsr(int(dur * SR), 0.008, 0.06, 0.6, ln * step * 0.5)
-            tone = additive_tone(f, dur, partials=6, inharm=inharm,
-                                  decay=1.3, amp=gain, env=env)
-            t = step_time(bar_i, s)
-            # ping-pong placement for width
-            (L if (s // 2) % 2 == 0 else R).add(tone, t, 1.0)
-            (R if (s // 2) % 2 == 0 else L).add(tone, t, 0.6)
+    def i_chord(chord, dur_steps, bar, step, gain=0.5, bright=2600, octv=0, stab=False):
+        freqs = [hz(t, octv) for t in CHORDS[chord]]
+        dur = dur_steps * STEP * (0.5 if stab else 1.0)
+        n = int(dur * SR)
+        w = np.zeros(n)
+        for f in freqs:
+            ss = supersaw(f, dur, voices=5, detune=0.13)
+            w += ss[:n]
+        w = highpass(lowpass(w, bright), 180)   # carve low-mids -> bass+lead breathe
+        env = adsr(n, 0.004 if stab else 0.02, 0.12, 0.2 if stab else 0.7,
+                   0.08 if stab else 0.25)
+        add_wide(pump, w * env / len(freqs), st(bar, step), gain)
 
-    # ----- Pad / drone: inharmonic, slow AM entrainment, establishes the
-    # alien tonal world and a hypnotic steady-state bed.
-    def play_pad(bar_i, n_bars, degs, gain=0.22):
-        dur = n_bars * bar
-        mix = np.zeros(int(dur * SR))
-        for deg, octv in degs:
-            f = hz(deg, octv)
-            env = adsr(int(dur * SR), 0.8, 0.5, 0.85, 1.2)
-            mix += additive_tone(f, dur, partials=10, inharm=0.0015,
-                                 decay=1.1, amp=gain, env=env)
-        mix = am_entrain(mix, rate=beat and (1.0 / beat) / 2, depth=0.12)  # half-beat pulse
-        t = bar_i * bar
-        L.add(mix, t, 0.9)
-        R.add(mix, t, 0.9)
+    def i_lead(name, octv, dur_steps, bar, step, gain=0.5, pan=0.5, alien=0.0):
+        f = hz(name, octv, cents=alien)
+        dur = dur_steps * STEP * 0.98
+        n = int(dur * SR)
+        w = lowpass(supersaw(f, dur, voices=7, detune=0.16), 5200)
+        env = adsr(n, 0.008, 0.1, 0.78, 0.07)
+        w = delay(w[:n] * env, BEAT * 0.75, feedback=0.28, mix=0.16)
+        add_wide(music, w, st(bar, step), gain, haas_ms=7, spread=0.72)
 
-    # ----- Groove: the SYNCOPATION SWEET-SPOT. Medium syncopation maximizes
-    # the pleasurable urge to move -- not the rigid on-beat (boring) nor fully
-    # off (chaotic). Kick mostly on strong beats, with anticipatory pushes.
-    kick_steps = [0, 6, 8, 11]          # the "&" pushes create the pull
-    hat_steps = [2, 4, 6, 10, 12, 14, 15]
-    sub_steps = [0, 8, 11]
+    def i_pluck(name, octv, dur_steps, bar, step, gain=0.45, pan=0.5):
+        f = hz(name, octv)
+        dur = max(dur_steps * STEP, 0.2)
+        n = int(dur * SR)
+        w = 0.7 * fm(f, dur, ratio=2.0, index=3.2, idx_decay=9) + 0.3 * saw(f, dur, 12)
+        env = adsr(n, 0.002, 0.13, 0.0, 0.09)
+        music.add(lowpass(w[:n], 5200) * env, st(bar, step), gain, pan)
 
-    def play_groove(bar_i, energy=1.0):
-        for s in kick_steps:
-            L.add(kick(amp=0.9 * energy), step_time(bar_i, s))
-            R.add(kick(amp=0.9 * energy), step_time(bar_i, s))
-        for s in hat_steps:
-            h = hat(amp=0.32 * energy, lp=(s % 4 == 0))
-            pan = 0.5 + 0.4 * math.sin(s)
-            L.add(h, step_time(bar_i, s), pan)
-            R.add(h, step_time(bar_i, s), 1 - pan)
-        for s in sub_steps:
-            deg = "1" if s != 11 else "7/6"   # alien sub-note on the push
-            sb = sub_bass(hz(deg, -1), beat * 0.9, amp=0.8 * energy)
-            L.add(sb, step_time(bar_i, s)); R.add(sb, step_time(bar_i, s))
+    def i_arp(name, octv, bar, step, gain=0.32, pan=0.5):
+        i_pluck(name, octv, 1, bar, step, gain, pan)
 
-    def shimmer(bar_lo, bar_hi, gain=0.12):
-        # ASMR-adjacent high sparkle / frisson topping
-        for bar_i in range(bar_lo, bar_hi):
-            for s in [1, 5, 9, 13]:
-                f = hz("5/2", 1) * (1 + 0.001 * s)
-                sp = additive_tone(f, step * 2, partials=3, inharm=0.01, amp=gain)
-                L.add(sp, step_time(bar_i, s), 0.7)
-                R.add(sp, step_time(bar_i, s + 1), 0.7)
+    def i_vox(name, octv, dur_steps, bar, step, gain=0.5, pan=0.5):
+        f = hz(name, octv)
+        dur = dur_steps * STEP
+        n = int(dur * SR)
+        base = saw(f, dur, 30)[:n]
 
-    def grooves(bar_lo, n, energy=1.0):
-        for i in range(n):
-            play_groove(bar_lo + i, energy=energy)
+        def bp(x, lo, hi):
+            sos = butter(2, [lo / (SR / 2), hi / (SR / 2)], btype="band", output="sos")
+            return sosfilt(sos, x)
+        form = 1.0 * bp(base, 600, 1000) + 0.7 * bp(base, 1100, 1600) + 0.6 * bp(base, 250, 500)
+        env = adsr(n, 0.03, 0.1, 0.7, 0.12)
+        w = delay(form * env, BEAT * 0.5, 0.22, 0.2)
+        music.add(w * 0.7, st(bar, step), gain, pan)
 
-    # ========================= ARRANGEMENT (64 bars) =========================
-    # Sectioned to build & release tension repeatedly -- the anticipation
-    # architecture that drives dopaminergic craving + replay.
+    # ----------------------------------------------------------- drums
+    def place(sample, bar, step, gain=1.0, pan=0.5):
+        drums.add(sample, st(bar, step), gain, pan)
 
-    # INTRO (0-3): drone establishes the alien tonal world + slow entrainment.
-    play_pad(0, 4, [("1", 0), ("3/2", 0), ("7/4", 0)], gain=0.26)
-    L.add(noise_riser(bar * 0.9, 0.18), 3 * bar); R.add(noise_riser(bar * 0.9, 0.18), 3 * bar)
+    def kick_at(bar, step, amp=0.95):
+        tt = st(bar, step)
+        drums.add(kick(amp=amp), tt, 1.0, 0.5)
+        kick_times.append(tt)
 
-    # BUILD 1 (4-7): groove enters low-energy; first hook statement.
-    for i in range(4):
-        play_groove(4 + i, energy=0.6 + 0.1 * i)
-    play_pad(4, 4, [("1", 0), ("5/4", 0), ("3/2", 0)], gain=0.2)
-    play_hook(6, hook, gain=0.42)
+    def drums_four(bar, energy=1.0, fill=False, ohat=True):
+        for s in [0, 4, 8, 12]:
+            kick_at(bar, s, 0.95 * energy)
+        for s in [4, 12]:
+            place(clap(), bar, s, 0.85 * energy)
+        for s in range(1, 16, 2):
+            place(hat(), bar, s, 0.26 * energy, pan=0.5 + 0.18 * np.sin(s))
+        if ohat:
+            for s in [2, 6, 10, 14]:
+                place(hat(open_=True), bar, s, 0.2 * energy)
+        if fill:
+            for j, s in enumerate([12, 13, 14, 15]):
+                place(tom(190 - j * 28, amp=0.85), bar, s, 0.85)
 
-    # GROOVE A (8-15): full groove + hook repeated with subtle variation
-    # (optimal surprise: same skeleton, one note nudged each loop).
-    grooves(8, 8, energy=1.0)
-    play_pad(8, 8, [("1", 0), ("3/2", 0), ("9/8", 0)], gain=0.16)
-    for j, bar_i in enumerate([8, 10, 12, 14]):
-        play_hook(bar_i, hook if j % 2 == 0 else hook_var, gain=0.5)
+    def drums_verse(bar, energy=0.8):
+        kick_at(bar, 0, 0.9 * energy); kick_at(bar, 7, 0.55 * energy); kick_at(bar, 10, 0.55 * energy)
+        place(clap(), bar, 4, 0.7 * energy); place(clap(), bar, 12, 0.7 * energy)
+        for s in range(2, 16, 4):
+            place(hat(), bar, s, 0.22 * energy)
 
-    # BREAKDOWN 1 (16-19): beat drops out, 11/8 tension pad + long riser.
-    play_pad(16, 4, [("1", 0), ("11/8", 0), ("7/4", 0)], gain=0.28)
-    play_hook(17, hook_var, gain=0.3, inharm=0.004)  # ghostly inharmonic echo
-    L.add(noise_riser(bar * 2.0, 0.5), 18 * bar); R.add(noise_riser(bar * 2.0, 0.5), 18 * bar)
+    def drums_half(bar, energy=0.9):
+        kick_at(bar, 0, 1.0 * energy)
+        place(snare(), bar, 8, 0.9 * energy)
+        for s in [2, 6, 10, 14]:
+            place(hat(), bar, s, 0.24 * energy)
 
-    # DROP 1 / CHORUS (20-27): frisson -- everything hits, hook lifts an octave
-    # (register lift = chills trigger), consonant resolution after 11/8 tension.
-    grooves(20, 8, energy=1.15)
-    play_pad(20, 8, [("1", 0), ("5/4", 0), ("3/2", 0), ("2", 0)], gain=0.2)
-    for bar_i in [20, 22, 24, 26]:
-        play_hook(bar_i, hook, gain=0.55, oct_shift=1)   # the lift
-        play_hook(bar_i, hook, gain=0.3)                  # doubled low
-    shimmer(20, 28)
+    def roll_into(bar_lo, bars, gain=0.5):
+        for tt, g in snare_roll(bars, bar_lo, gain):
+            drums.add(snare(dur=0.14, amp=g), tt, 1.0, 0.5)
 
-    # GROOVE B (28-35): keep the energy, alternate hook/variation, alien sub.
-    grooves(28, 8, energy=1.05)
-    play_pad(28, 8, [("1", 0), ("7/6", 0), ("3/2", 0)], gain=0.17)  # 7/6 alien color
-    for j, bar_i in enumerate([28, 30, 32, 34]):
-        play_hook(bar_i, hook_var if j % 2 == 0 else hook, gain=0.5,
-                  oct_shift=1 if j == 3 else 0)
-    shimmer(32, 36, gain=0.08)
+    # ----------------------------------------------------------- helpers
+    def chord_of(bar):
+        return SEQ[bar % 4]
 
-    # BREAKDOWN 2 (36-43): deeper + longer -- max anticipation before the big
-    # drop. Inharmonic ghost-hook, two stacked risers, all-tension tuning.
-    play_pad(36, 8, [("1", 0), ("11/8", 0), ("7/4", 0), ("9/4", 0)], gain=0.3)
-    play_hook(38, hook, gain=0.32, inharm=0.006)
-    play_hook(40, hook_var, gain=0.3, inharm=0.01, oct_shift=1)
-    L.add(noise_riser(bar * 3.5, 0.55), 40 * bar); R.add(noise_riser(bar * 3.5, 0.55), 40 * bar)
+    def play_bass(bar, energy=1.0, busy=True):
+        c = chord_of(bar); root = BASS_ROOT[c]
+        # (step, len, octave) -- octave bounce on the off-beats gives the
+        # bassline movement/catch instead of a static root.
+        pat = ([(0, 2, -1), (6, 2, 0), (8, 2, -1), (11, 1, 0), (14, 2, -1)]
+               if busy else [(0, 4, -1), (8, 4, -1)])
+        for s, ln, octv in pat:
+            i_bass(root, octv, ln, bar, s, gain=0.85 * energy)
 
-    # DROP 2 / FINAL CHORUS (44-55): the biggest payoff. Octave-lifted hook +
-    # low double + counter-shimmer; highest energy; longest sustained groove.
-    grooves(44, 12, energy=1.2)
-    play_pad(44, 12, [("1", 0), ("5/4", 0), ("3/2", 0), ("2", 0), ("5/2", 0)], gain=0.19)
-    for bar_i in [44, 46, 48, 50, 52, 54]:
-        play_hook(bar_i, hook, gain=0.55, oct_shift=1)
-        play_hook(bar_i, hook_var, gain=0.28)
-    shimmer(44, 56, gain=0.13)
+    def play_chords(bar, gain=0.5, bright=2600, stab=False, octv=0):
+        c = chord_of(bar)
+        if stab:
+            for s in [0, 6, 10]:
+                i_chord(c, 2, bar, s, gain=gain, bright=bright, stab=True, octv=octv)
+        else:
+            i_chord(c, 16, bar, 0, gain=gain, bright=bright, octv=octv)
 
-    # OUTRO (56-63): strip back to drone + groove decaying; hook left UNRESOLVED
-    # on the alien 7/4 (no return to tonic) -> the open loop / Zeigarnik tail
-    # that keeps replaying in the head after the track ends.
-    play_pad(56, 8, [("1", 0), ("3/2", 0)], gain=0.24)
-    for i in range(4):
-        play_groove(56 + i, energy=max(0.2, 0.7 - 0.13 * i))
-    play_hook(58, [("1", 1, 0, 2), ("5/4", 1, 2, 2), ("3/2", 1, 4, 2),
-                   ("7/4", 1, 6, 6)], gain=0.5)
-    play_hook(61, [("3/2", 1, 0, 2), ("7/4", 1, 4, 8)], gain=0.4)  # hangs on 7/4
+    def play_hook(bar4_start, gain=0.5, octave_shift=0, response=False):
+        for b in range(4):
+            bar = bar4_start + b
+            for (name, octv, step, ln) in HOOK[b]:
+                alien = 15.0 if step == 4 else 0.0   # alien lean on the peak note
+                i_lead(name, octv + octave_shift, ln, bar, step,
+                       gain=gain, pan=0.5, alien=alien)
+            if response:
+                for (name, octv, step, ln) in RESP[b]:
+                    i_lead(name, octv + octave_shift, ln, bar, step, gain=gain * 0.6, pan=0.62)
 
-    # ========================= MASTER =========================
-    left, right = L.buf, R.buf
-    left = schroeder_reverb(left, mix=0.22)
-    right = schroeder_reverb(right, mix=0.22)
-    left, right = stereo_widen(left, right, ms=11)
+    def play_hook_pluck(bar4_start, gain=0.4):
+        for b in range(4):
+            bar = bar4_start + b
+            for (name, octv, step, ln) in HOOK[b]:
+                i_pluck(name, octv, max(ln, 1), bar, step, gain=gain, pan=0.42)
 
-    # gentle master bus glue + brickwall-ish soft limit
-    stereo = np.stack([left, right])
-    peak = np.max(np.abs(stereo))
-    stereo = stereo / (peak + 1e-9) * 0.9
-    stereo = soft_clip(stereo, 1.15)
+    def play_arp(bar, gain=0.3):
+        tones = CHORDS[chord_of(bar)]
+        seq = [(tones[0], 1), (tones[1], 1), (tones[2], 1), (tones[0], 2),
+               (tones[1], 2), (tones[2], 2), (tones[0], 2), (tones[1], 1)] * 2
+        for s in range(16):
+            name, octv = seq[s]
+            i_arp(name, octv, bar, s, gain=gain, pan=0.5 + 0.3 * np.sin(s * 1.3))
+
+    def play_vox(bar, gain=0.5, octv=1):
+        tones = CHORDS[chord_of(bar)]
+        hits = [(0, tones[2], 2), (3, tones[0], 1), (6, tones[1], 2), (10, tones[2], 2), (12, tones[0], 3)]
+        for s, name, ln in hits:
+            i_vox(name, octv, ln, bar, s, gain=gain, pan=0.5 + 0.12 * np.sin(s))
+
+    def crash_at(bar):
+        # impact stack: crash + sub-boom + noise hit -> the drop lands hard.
+        drums.add(crash(), bar * BAR, 0.55, 0.5)
+        nb = int(1.2 * SR)
+        boom = sine(46, 1.2) * np.exp(-np.linspace(0, 1, nb) * 4)
+        drums.add(soft_clip(boom, 1.4) * 0.6, bar * BAR, 1.0, 0.5)
+        nn = int(0.5 * SR)
+        nz = highpass(np.random.uniform(-1, 1, nn), 3000) * np.exp(-np.linspace(0, 1, nn) * 7)
+        drums.add(nz * 0.35, bar * BAR, 1.0, 0.5)
+
+    def downlift(bar):
+        music.add(downlifter(BAR * 0.9), bar * BAR, 0.4, 0.5)
+
+    # ================================================ ARRANGEMENT (96 bars)
+    # INTRO (0-7): atmosphere, opening filter, no beat -> tease.
+    for bar in range(0, 8):
+        play_chords(bar, gain=0.32, bright=900 + bar * 320)
+    play_hook_pluck(4, gain=0.32)   # tease the hook quietly
+    music.add(riser(BAR * 2, 0.28, "noise"), 6 * BAR, 0.5, 0.5)
+
+    # VERSE A (8-15): groove, bass, plucked hook, sparse vox.
+    for bar in range(8, 16):
+        drums_verse(bar, energy=0.85)
+        play_bass(bar, energy=0.85, busy=True)
+        play_chords(bar, gain=0.3, bright=2200, stab=True)
+    play_hook_pluck(8, gain=0.42); play_hook_pluck(12, gain=0.42)
+    for bar in [10, 11, 14, 15]:
+        play_vox(bar, gain=0.32)
+
+    # PREDROP 1 (16-19): build + accelerating snare roll + riser, beat cuts out.
+    for bar in range(16, 19):
+        play_chords(bar, gain=0.34, bright=1500 + (bar - 16) * 900, stab=True)
+        play_bass(bar, energy=0.8, busy=False)
+    roll_into(16, 4, gain=0.45)
+    music.add(riser(BAR * 4, 0.5, "noise"), 16 * BAR, 0.6, 0.5)
+    music.add(riser(BAR * 3, 0.4, "tone"), 16 * BAR, 0.4, 0.5)
+    downlift(19)
+
+    # DROP 1 / CHORUS (20-35): full kit, sidechain pump, supersaw hook.
+    crash_at(20)
+    for bar in range(20, 36):
+        drums_four(bar, energy=1.0, fill=(bar % 8 == 7), ohat=True)
+        play_bass(bar, energy=1.0, busy=True)
+        play_chords(bar, gain=0.42, bright=3200)
+    for s in [20, 24, 28, 32]:
+        play_hook(s, gain=0.52, response=(s >= 28))
+    for bar in range(28, 36):
+        play_arp(bar, gain=0.26)
+
+    # VERSE B (36-43): strip back, NEW texture -> "more happening": vox-chop
+    # lead, busier percussion, plucked counter-melody.
+    for bar in range(36, 44):
+        drums_verse(bar, energy=0.95)
+        play_bass(bar, energy=0.95, busy=True)
+        play_chords(bar, gain=0.3, bright=2400, stab=True)
+        play_vox(bar, gain=0.5)
+    play_hook_pluck(36, gain=0.4); play_hook_pluck(40, gain=0.4)
+    for bar in range(40, 44):
+        play_arp(bar, gain=0.22)
+
+    # PREDROP 2 (44-47): bigger build.
+    for bar in range(44, 47):
+        play_chords(bar, gain=0.36, bright=1600 + (bar - 44) * 1000, stab=True)
+        play_bass(bar, energy=0.85, busy=False)
+    roll_into(44, 4, gain=0.55)
+    music.add(riser(BAR * 4, 0.6, "noise"), 44 * BAR, 0.65, 0.5)
+    music.add(riser(BAR * 4, 0.45, "tone"), 44 * BAR, 0.45, 0.5)
+    downlift(47)
+
+    # DROP 2 (48-67): biggest -> hook + arp + response + vox stacked.
+    crash_at(48)
+    for bar in range(48, 68):
+        drums_four(bar, energy=1.1, fill=(bar % 8 == 7))
+        play_bass(bar, energy=1.05, busy=True)
+        play_chords(bar, gain=0.44, bright=3600)
+        play_arp(bar, gain=0.24)
+    for s in [48, 52, 56, 60, 64]:
+        play_hook(s, gain=0.54, octave_shift=(1 if s >= 60 else 0), response=True)
+    for bar in [50, 54, 58, 62, 66]:
+        play_vox(bar, gain=0.34)
+
+    # BRIDGE (68-75): half-time, emotional, breakdown -> reset before final.
+    for bar in range(68, 76):
+        drums_half(bar, energy=0.9)
+        play_bass(bar, energy=0.7, busy=False)
+        play_chords(bar, gain=0.4, bright=1800 + (bar - 68) * 180)
+    play_hook(68, gain=0.4)
+    for bar in [70, 71, 74, 75]:
+        play_vox(bar, gain=0.4, octv=1)
+    roll_into(74, 2, gain=0.5)
+    music.add(riser(BAR * 2, 0.5, "noise"), 74 * BAR, 0.6, 0.5)
+
+    # FINAL DROP (76-91): everything, octave-up hook, max energy.
+    crash_at(76)
+    for bar in range(76, 92):
+        drums_four(bar, energy=1.15, fill=(bar % 8 == 7))
+        play_bass(bar, energy=1.1, busy=True)
+        play_chords(bar, gain=0.45, bright=3800)
+        play_arp(bar, gain=0.28)
+    for s in [76, 80, 84, 88]:
+        play_hook(s, gain=0.56, octave_shift=1, response=True)
+        play_hook(s, gain=0.3, octave_shift=0)
+    for bar in range(76, 92):
+        if bar % 2 == 0:
+            play_vox(bar, gain=0.3)
+
+    # OUTRO (92-95): filter down, hook echo left UNRESOLVED on the alien peak.
+    for bar in range(92, 96):
+        play_chords(bar, gain=0.34, bright=2600 - (bar - 92) * 550)
+    play_hook_pluck(92, gain=0.4)
+    # final hang on the alien-leaning peak note, no resolution to tonic
+    i_lead("E", 2, 8, 95, 4, gain=0.5, alien=15.0)
+
+    # ============================================== MIX
+    sc_pump = make_sidechain(total_sec, kick_times, depth=0.8)
+    sc_music = make_sidechain(total_sec, kick_times, depth=0.35)
+    L = drums.L + pump.L * sc_pump + music.L * sc_music
+    R = drums.R + pump.R * sc_pump + music.R * sc_music
+    L = reverb(L, mix=0.16); R = reverb(R, mix=0.16)
+    L = highpass(L, 28); R = highpass(R, 28)
+    stereo = np.stack([L, R])
+    stereo = stereo / (np.max(np.abs(stereo)) + 1e-9) * 0.92
+    stereo = soft_clip(stereo, 1.1)
     stereo = stereo / (np.max(np.abs(stereo)) + 1e-9) * 0.95
-
-    # 3s fade in / 4s fade out
-    fi = int(3 * SR); fo = int(4 * SR)
+    fi = int(0.5 * SR); fo = int(3 * SR)
     stereo[:, :fi] *= np.linspace(0, 1, fi)
     stereo[:, -fo:] *= np.linspace(1, 0, fo)
     return stereo
@@ -378,9 +630,7 @@ def render():
 def write_wav(path, stereo):
     data = (np.clip(stereo.T, -1, 1) * 32767).astype("<i2")
     with wave.open(path, "wb") as w:
-        w.setnchannels(2)
-        w.setsampwidth(2)
-        w.setframerate(SR)
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
         w.writeframes(data.tobytes())
 
 
@@ -389,5 +639,4 @@ if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "soundtrack.wav"
     stereo = render()
     write_wav(out, stereo)
-    dur = stereo.shape[1] / SR
-    print(f"wrote {out}  ({dur:.1f}s, {stereo.shape[1]} frames, stereo {SR}Hz)")
+    print(f"wrote {out}  ({stereo.shape[1] / SR:.1f}s, stereo {SR}Hz)")
