@@ -2,3 +2,4 @@ synth/*.wav
 synth/*.png
 __pycache__/
 *.pyc
+*.zip
