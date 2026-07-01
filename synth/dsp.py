@@ -127,7 +127,7 @@ def pink_curve(n_points, lo=0.0, hi=1.0):
     """Smooth 1/f control curve in [lo,hi] for micro-timing / dynamics."""
     p = pink(max(64, n_points))
     p = np.interp(np.linspace(0, len(p) - 1, n_points), np.arange(len(p)), p)
-    p = (p - p.min()) / (p.ptp() + 1e-9)
+    p = (p - p.min()) / (np.ptp(p) + 1e-9)
     return lo + (hi - lo) * p
 
 
