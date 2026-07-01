@@ -113,14 +113,14 @@ def swell(n, peak=0.55):
 
 # -------------------------------------------------------------------- noise
 def pink(n):
-    """1/f pink noise via Voss-ish octave summation (organic fluctuation)."""
-    rows = 16
-    out = np.zeros(n)
-    for r in range(rows):
-        step = 2 ** r
-        vals = np.random.uniform(-1, 1, n // step + 2)
-        out += np.repeat(vals, step)[:n]
-    return out / rows
+    """1/f pink noise via FFT filtering (1/sqrt(f)). Smooth and continuous --
+    unlike the Voss/np.repeat staircase, which produces periodic DC jumps that
+    are audible as clicks/crackle."""
+    white = np.random.standard_normal(n)
+    X = np.fft.rfft(white)
+    f = np.arange(len(X), dtype=float); f[0] = 1.0
+    out = np.fft.irfft(X / np.sqrt(f), n)
+    return out / (np.max(np.abs(out)) + 1e-9)
 
 
 def pink_curve(n_points, lo=0.0, hi=1.0):

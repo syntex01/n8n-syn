@@ -78,6 +78,12 @@ def place(sig, at, gain=1.0, pan=0.5, send=0.2, jitter=0.0):
         at = at + float(rng.standard_normal()) * jitter
     # per-note micro-dynamics: ±1.5 dB pink
     gain *= 10 ** (float(rng.uniform(-1.5, 1.5)) / 20.0 * 0.5)
+    # declick: 3 ms fades at both ends kill edge transients (pops/clicks)
+    sig = np.asarray(sig, dtype=float).copy()
+    fd = int(0.003 * SR)
+    if len(sig) > 3 * fd:
+        sig[:fd] *= np.linspace(0, 1, fd)
+        sig[-fd:] *= np.linspace(1, 0, fd)
     ST.add(sig, max(0.0, at), gain, pan, send)
 
 
@@ -182,6 +188,73 @@ def reverse_swell(freq, dur, gain=0.25):
     return lowpass(w, 2000) * swell(n, 0.9) * gain
 
 
+# ---- motion voices (added to fix "boring": movement, pulse, momentum) ----
+def i_arp(freq, dur, gain=0.2):
+    """Warm plucked arpeggio voice — soft attack, gentle decay, LP'd (no
+    harsh top). Provides continuous melodic motion."""
+    n = int(dur * SR); t = t_of(dur)
+    w = warm_osc(freq, dur, rolloff=1.7, partials=8)[:n] * drift(n)
+    env = np.exp(-t * 4.2) * (1 - np.exp(-t * 300))
+    return lowpass(w * env, 3200) * gain
+
+
+def i_basspluck(freq, dur, gain=0.42):
+    """Rhythmic sub-bass pluck (warm, LP'd) for a moving bassline."""
+    n = int(dur * SR); t = t_of(dur)
+    w = np.sin(2 * np.pi * freq * t) + 0.3 * warm_osc(freq, dur, rolloff=1.8, partials=6)[:n]
+    env = np.exp(-t * 3.0) * (1 - np.exp(-t * 260))
+    return lowpass(soft_sat(w * env, 1.05), 420) * gain
+
+
+def soft_rim(gain=0.14):
+    """Soft, warm rim/tick (sine click + LP'd noise <1.5 kHz — no hiss)."""
+    dur = 0.08; t = t_of(dur)
+    click = np.sin(2 * np.pi * 320 * t) * np.exp(-t * 42)
+    nz = lowpass(rng.uniform(-1, 1, len(t)), 1500) * np.exp(-t * 55) * 0.3
+    return (click + nz) * gain
+
+
+def lay_arp(notes, at, dur, gain=0.18, step=EIGHTH, pan=0.5):
+    tones = []
+    for x in notes:
+        f = note(x)
+        while f < 250:            # lift low chord tones into the arp register
+            f *= 2
+        tones.append(f)
+    tones = sorted(set(tones))
+    order = tones + tones[-2:0:-1] if len(tones) > 2 else tones
+    t = at; i = 0
+    while t < at + dur - 1e-6:
+        f = order[i % len(order)]
+        p = min(0.85, max(0.15, pan + 0.28 * np.sin(i * 0.7)))
+        place(i_arp(f, step * 1.9, gain=gain), t, 1.0, p, 0.32, jitter=0.006)
+        t += step; i += 1
+
+
+def lay_groove(at, dur, gain=1.0, dense=False):
+    t = at
+    while t < at + dur - 1e-6:
+        place(heartbeat(gain=0.40 * gain), t, 1.0, 0.5, 0.05, jitter=0.010)
+        place(heartbeat(gain=0.24 * gain), t + 3 * EIGHTH, 1.0, 0.5, 0.05, jitter=0.010)
+        for e in ([1, 2, 4, 5] if dense else [2, 4]):
+            place(soft_rim(gain=0.12 * gain), t + e * EIGHTH, 1.0,
+                  0.5 + 0.12 * (e - 3), 0.15, jitter=0.008)
+        t += BAR
+
+
+def lay_bass(root, at, dur, gain=0.40):
+    rf = note(root)
+    while rf > 95:                # keep it low
+        rf /= 2
+    pat = [(0, 1.0), (1.5, 1.0), (3, 1.5), (4.5, 1.0)]   # 1.5 = the fifth
+    t = at
+    while t < at + dur - 1e-6:
+        for off, ratio in pat:
+            place(i_basspluck(rf * ratio, EIGHTH * 1.5, gain=gain),
+                  t + off * EIGHTH, 1.0, 0.5, 0.06, jitter=0.006)
+        t += BAR
+
+
 # --------------------------------------------------------------- reverb (conv)
 def make_ir(seed, rt60=3.6, predelay_ms=25, damp=4200):
     n = int(rt60 * SR)
@@ -268,9 +341,11 @@ A_chords = [
 for nm, b, dur in A_chords:
     chord(nm, b * BAR, dur * BAR, inst="pad", gain=0.5, send=0.35, spread=0.4)
 # incomplete motif germs, trailing into reverb
-play_motif(14, "incomplete", gain=0.32, send=0.5)
-play_motif(24, "incomplete", gain=0.34, send=0.5)
+play_motif(14, "incomplete", gain=0.42, send=0.5)
+play_motif(24, "incomplete", gain=0.44, send=0.5)
 place(reverse_swell(note("A4"), 4, gain=0.15), 31, 1.0, 0.5, 0.5)
+# gentle arp enters mid-A to introduce motion early (fights the "boring")
+lay_arp(["D4", "F4", "A4"], 20, 15, gain=0.09, step=EIGHTH * 2)
 
 # ===== SECTION B : Longing / Growth (35-92 s) — full motif, appoggiaturas
 SPINE = [
@@ -289,6 +364,11 @@ while b < 46:
         chord(nm, at, 2 * BAR, inst="pad", gain=1.0, send=0.3, spread=0.4)
         if k == 0:   # choir enters on the tonic of each loop
             chord(nm[2:], at, 2 * BAR, inst="choir", gain=0.9, send=0.45, spread=0.5)
+        # motion: flowing arp + gentle pulse + moving bass (grows across B)
+        grow = min(1.0, 0.5 + (at - 35) / 60)
+        lay_arp(nm, at, 2 * BAR, gain=0.15 * grow)
+        lay_groove(at, 2 * BAR, gain=0.5 * grow, dense=False)
+        lay_bass(nm[0], at, 2 * BAR, gain=0.36 * grow)
         b += 2
 # bass follows roots
 for at, rn in [(35, "D2"), (43, "Bb2"), (51, "C2"), (59, "G2"),
@@ -297,9 +377,9 @@ for at, rn in [(35, "D2"), (43, "Bb2"), (51, "C2"), (59, "G2"),
 # secondary theme (cello): A3 C4 D4 E4, one note/bar, the rising foil
 for i, nm in enumerate(["A3", "C4", "D4", "E4"]):
     place(i_cello(note(nm), 2 * BAR, gain=0.2), 40 + i * 3, 1.0, 0.4, 0.3)
-# full motif statements with G->F appoggiatura leaning
-for at in [38, 52, 66, 80]:
-    play_motif(at, "full", gain=0.42, send=0.4)
+# full motif statements with G->F appoggiatura leaning (more frequent + present)
+for at in [37, 45, 53, 61, 69, 77, 85]:
+    play_motif(at, "full", gain=0.6, send=0.38)
 # Dorian glimmer (B natural) buried, then extinguished by Am7b5
 place(i_choir(note("B4"), 3, gain=0.08), 74, 1.0, 0.6, 0.5)
 chord(["A2", "Eb4", "G4", "C5"], 77, 3 * BAR, inst="pad", gain=0.7, send=0.35)
@@ -319,11 +399,17 @@ for nm, bb, dur in C_chords:
     chord(nm[-2:], at, dur * BAR, inst="choir", gain=0.95, send=0.5, spread=0.5)
     bass_drone([nm[0]], at, dur * BAR, gain=0.45)
     place(i_cello(note(nm[0]) * 2, dur * BAR, gain=0.2), at, 1.0, 0.55, 0.3)  # sustain fills C
-# register climb: inverted motif (desperate reach) mid-C
-play_motif(104, "inverted", gain=0.4, send=0.42)
-play_motif(120, "inverted", gain=0.42, send=0.42, transpose=1.0)
+    lay_arp(nm, at, dur * BAR, gain=0.2, step=EIGHTH)          # denser motion
+    lay_groove(at, dur * BAR, gain=0.9, dense=True)
+    lay_bass(nm[0], at, dur * BAR, gain=0.42)
+# register climb: motif statements building through C (more present + frequent)
+play_motif(94, "full", gain=0.58, send=0.4)
+play_motif(102, "inverted", gain=0.56, send=0.42)
+play_motif(110, "full", gain=0.6, send=0.4)
+play_motif(120, "inverted", gain=0.6, send=0.42)
+play_motif(130, "full", gain=0.64, send=0.38)
 # THE one clean canonical motif statement, just before the peak
-play_motif(140, "full", gain=0.5, send=0.35)
+play_motif(140, "full", gain=0.72, send=0.35)
 # heartbeat begins quietly in C, building
 for i in range(int((92) / 2), int(148 / 2)):
     t = i * 2.0
@@ -367,6 +453,11 @@ for nm, bb, dur in D_chords:
     at = bb * BAR
     chord(nm, at, dur * BAR, inst="pad", gain=0.8, send=0.4, spread=0.4)
     bass_drone([nm[0]], at, dur * BAR, gain=0.32)
+    # motion continues but thinning (aftermath still moves, then fades)
+    fade = max(0.2, 1.0 - (at - 156) / 60)
+    lay_arp(nm, at, dur * BAR, gain=0.12 * fade)
+    lay_groove(at, dur * BAR, gain=0.5 * fade, dense=False)
+    lay_bass(nm[0], at, dur * BAR, gain=0.3 * fade)
 # motif returns "wounded" (fragment, lower, hesitant)
 play_motif(162, "fragment", gain=0.34, send=0.5)
 play_motif(178, "fragment", gain=0.3, send=0.55)
