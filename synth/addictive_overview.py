@@ -1,4 +1,4 @@
-"""Waveform + energy + section-map overview for pulse.wav (RESIDUA — pulse cut)."""
+"""Waveform + energy + section-map overview for addictive.wav (RESIDUA — addiction rework)."""
 import sys
 import wave
 
@@ -49,7 +49,7 @@ def main(path, out):
 
     ax[0].fill_between(te, env, -env, color="#5ad1e6", lw=0)
     ax[0].set_ylim(-1, 1); ax[0].set_xlim(0, dur)
-    ax[0].set_title("RESIDUA (pulse cut)  —  addiction-first  ·  140 BPM half-time  ·  D Phrygian",
+    ax[0].set_title("RESIDUA  —  addiction-first rework  ·  140 BPM half-time  ·  D Phrygian",
                     color="#eee", fontsize=13)
     ax[0].set_yticks([])
     for b0, b1, label, col in SECTIONS:
@@ -72,5 +72,5 @@ def main(path, out):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "pulse.wav",
-         sys.argv[2] if len(sys.argv) > 2 else "pulse_overview.png")
+    main(sys.argv[1] if len(sys.argv) > 1 else "addictive.wav",
+         sys.argv[2] if len(sys.argv) > 2 else "addictive_overview.png")

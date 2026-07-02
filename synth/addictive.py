@@ -1,16 +1,29 @@
 """
-"GRAVEWATER — CRUSADE" : grimdark 40K, iterated.
+RESIDUA — addiction-first rework (implements the workflow build spec).
 
-Fixes/asks from the last pass:
- - CHANT reworked: 3 distinct phrases (varied contour/rhythm/vowels) + consonant
-   articulation so it reads as words, deployed SELECTIVELY (given rests) instead
-   of one loop everywhere; small per-repeat ornaments = optimal surprise.
- - MORE ALIEN / CUSTOM NOISES: metal scrape, ring-mod growl, alien zap, glitch
-   stutter, chaotic voice, granular shards — as accents/transitions.
- - FASTER CYCLES: short 2-bar build -> 6-bar charge cycles that repeat with
-   variation -> more frequent anticipation->reward (dopamine research), tighter
-   repetition-with-variation (earworm), groove-sweet-spot syncopation.
-Grounded in REPORT.md / research-sources.md. D Phrygian, 96 BPM, ~3:04.
+The apex RESIDUA read as "boring / not addicting" because its withheld-tonic
+design deliberately WITHHOLDS resolution — anti-replay. This rework inverts the
+priority order to ADDICTING > exciting > alien/chilling, per the multi-agent
+build spec derived from REPORT.md / research-sources.md:
+
+ - THE HOOK up front by ~0:04: arch rise D-F-A -> ascending m6 LEAP into a held
+   F5 belt -> b2 sigh (Eb +12c, the alien fingerprint) -> HARD tonic resolve.
+   Foreground bright lead voice; choir only a quiet doubler. Recurs every 2 bars.
+ - GROOVE that never drops out: half-time (140 BPM), medium-syncopation kick,
+   backbeat snare, persistent 8th+16th hats, kick-bass interlock, driving reese.
+ - Frequent PAYOFFS: tonic lands every 2 bars; 5 section payoffs every 13-27 s.
+ - MESA loudness (flat high floor, one big drop as the peak) + 3-tier sidechain
+   so kick/pad/lead breathe without a dynamic-range hole.
+ - Alien demoted from structural (RESIDUA's beatless "Eye", withheld ending) to
+   surface texture: timbre, the b2 leap, counter-hooks (vox_glottis, revenant
+   bells, cribra ticks). No beatless section anywhere.
+
+Built on the crusade2 foundation (Bus / sc_env / master() dual-reverb + de-harsh
++ dark-tilt + limiter chain), not dsp3 — dsp3 is a mix toolkit with no
+instruments; crusade2 already mirrors its production chain and carries the full
+orchestral + invented-alien palette. D Phrygian, 140 BPM half-time, 84 bars ~2:28.
+Passes synth/qa.py §10 addiction gates (onset floor, beat continuity, hook-early,
+mesa 3-8 dB, loudness floor, dark centroid, no-harsh, tonic resolve).
 """
 import numpy as np
 from scipy.signal import fftconvolve
@@ -562,7 +575,7 @@ def groove_span(b0, b1, energy=1.0, density="chorus", reese_on=True):
         GROOVE_BARS.append(bar)
 
 
-print("building RESIDUA (pulse cut) ...")
+print("building RESIDUA (addiction rework) ...")
 
 # ==== ARRANGEMENT (84 bars, 140 BPM half-time) — hook & groove FORWARD ====
 def organ_bed(b0, nbars, gain=0.16, octv=0):
@@ -591,12 +604,13 @@ for ph in (4, 6, 8, 10):
     play_hook(ph, gain=0.62, doubler=(ph in (4, 8)))
 
 # §C VERSE 1 (12-19, 0:20-0:34): pulse kept, hook as octave-down pluck, alien counter-hook
-groove_span(12, 20, energy=0.8, density="verse")
-organ_bed(12, 8, 0.13)
+groove_span(12, 20, energy=0.9, density="verse")
+organ_bed(12, 8, 0.16)
+choir_bed(12, 8, 0.09)                                                # steady floor through the transition
 PAL.add(groundwater(8 * BAR, 36.7, 36.7, 0.24), bt(12), 1.0, 0.5, 0.25)
 PAL.add(psithura(8 * BAR, 0.2), bt(12), 1.0, 0.62, 0.15)
 for ph in (12, 14, 16, 18):
-    play_hook_pluck(ph, gain=0.42)
+    play_hook_pluck(ph, gain=0.5)
 for (nm, b) in [("A4", 4), ("G4", 8), ("F4", 12)]:                    # vox_glottis counter-hook answer
     MUS.add(vox_glottis(2 * BEAT, note(nm), 0.24), bt(13, b), 1.0, 0.62, 0.2)
 DRUM.add(riser(2 * BAR, 0.4), bt(18), 1.0, 0.5, 0.2)                  # build 18-19
@@ -609,12 +623,13 @@ for ph in (20, 22, 24, 26):
     play_hook(ph, gain=0.64, doubler=True, resp=(ph in (20, 24)))
 
 # §E VERSE 2 (28-35, 0:48-1:02): darker, hook-pluck APEX variation, alien beds
-groove_span(28, 36, energy=0.82, density="verse")
-organ_bed(28, 8, 0.13)
+groove_span(28, 36, energy=0.9, density="verse")
+organ_bed(28, 8, 0.16)
+choir_bed(28, 8, 0.09)                                                # steady floor
 PAL.add(ring_growl(46, 8 * BAR, 0.16), bt(28), 1.0, 0.5, 0.2)
 PAL.add(metal_scrape(8 * BAR, 0.14), bt(28), 1.0, 0.55, 0.25)
 for ph in (28, 30, 32, 34):
-    play_hook_pluck(ph, gain=0.44, apex=(ph == 32))
+    play_hook_pluck(ph, gain=0.5, apex=(ph == 32))
 DRUM.add(riser(2 * BAR, 0.45), bt(34), 1.0, 0.5, 0.2)                 # build 34-35
 
 # §F FRISSON LIFT (36-43, 1:02-1:15): THE chill — peak +15c + octave choir + shards
@@ -648,11 +663,12 @@ for b in range(48, 64, 2):                                                # war-
 DRUM.add(crash(0.5), bt(56), 1.0, 0.5, 0.2); PAL.add(braam(0.4), bt(56), 1.0, 0.5, 0.3)  # second-wind slam
 
 # §I VERSE 3 / COMEDOWN (64-71, 1:48-2:02): layers pulled, groove+hook kept
-groove_span(64, 72, energy=0.8, density="verse")
-organ_bed(64, 8, 0.13)
+groove_span(64, 72, energy=0.9, density="verse")
+organ_bed(64, 8, 0.16)
+choir_bed(64, 8, 0.09)                                                # steady floor
 PAL.add(groundwater(8 * BAR, 36.7, 36.7, 0.22), bt(64), 1.0, 0.5, 0.25)
 for ph in (64, 66, 68, 70):
-    play_hook_pluck(ph, gain=0.44)
+    play_hook_pluck(ph, gain=0.5)
 DRUM.add(riser(2 * BAR, 0.5), bt(70), 1.0, 0.5, 0.2)                  # build 70-71
 
 # §J DROP REPRISE + CADENCE (72-79, 2:02-2:15): PAYOFF #5, the hoarded C#->D V->i
@@ -694,10 +710,16 @@ def sc_env(n, times, depth, rel=0.14):
 def loudness(n):
     # MESA: high flat floor (no boring troughs); frequent small peaks at each
     # payoff; only cold-open ramp + final fade go low.
-    pts = [(0, -7), (7, -3.5), (20, -4), (34, -2.5), (48, -4), (62, -2),  # frisson lift
-           (76, -4), (82, -1.5), (96, -2),                              # big-drop plateau
-           (108, -4), (123, -2.5),                                      # verse3 / reprise
-           (137, -3.5), (144, -8), (148, -40)]                          # outro + fade
+    pts = [(0, -8), (6.9, -2.8),                     # cold-open ramp -> chorus1
+           (20.6, -3.0), (32, -3.0),                 # verse1 flat floor
+           (34.3, -2.6),                             # chorus2
+           (48, -3.0), (59, -3.0),                   # verse2 flat floor
+           (61.7, -1.9),                             # frisson lift peak
+           (75.4, -2.4),                             # pre-drop
+           (82.3, -1.7), (100, -2.0),                # big-drop plateau
+           (109.7, -3.0), (121, -3.0),               # verse3 flat floor
+           (123.4, -2.2), (135, -2.2),               # reprise
+           (137.1, -3.4), (144, -9), (148, -40)]     # outro resolve + fade
     ts = np.array([p[0] for p in pts]); db = np.array([p[1] for p in pts])
     return 10 ** (np.interp(np.arange(n) / SR, ts, db) / 20.0)
 
@@ -743,6 +765,6 @@ def write_wav(path, st):
 if __name__ == "__main__":
     import sys
     st = master()
-    out = sys.argv[1] if len(sys.argv) > 1 else "crusade.wav"
+    out = sys.argv[1] if len(sys.argv) > 1 else "addictive.wav"
     write_wav(out, st)
     print(f"wrote {out}  ({st.shape[1] / SR:.1f}s, stereo {SR}Hz)")
